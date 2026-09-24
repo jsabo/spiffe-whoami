@@ -1,67 +1,102 @@
 # spiffe-whoami
 
-A pod with no secret in it that still authenticates to AWS and to its neighbours. This
-small Go web app shows the SPIFFE identity Teleport issued to the pod it runs in, then
-uses it: it exchanges a 15-minute JWT for an AWS role whose trust policy names that one
-identity, and it makes mutual-TLS calls to peers that accept or refuse it by identity.
-Run the identical manifest in another namespace and both AWS and the peers say no.
+A small web app that shows the SPIFFE identity Teleport issued to the pod it runs in,
+then uses it: it assumes an AWS role with no access key, and it makes mutual-TLS calls
+that peer pods accept or refuse by identity alone. It is deployed by GitHub Actions
+through Teleport Machine ID, so the deployer holds no kubeconfig either.
 
-It is deployed to Kubernetes by GitHub Actions through Teleport Machine ID, so the
-deployer has no kubeconfig and no network route to the cluster either.
+Verified on k3s, Talos and Amazon EKS against Teleport 18.11.1 (Enterprise), same
+manifests on all three.
 
-Verified against Teleport 18.11.1 (Enterprise Cloud) on k3s, Talos 1.13 and Amazon EKS
-1.35, same manifests on all three.
+## What it shows
 
-## What you will see
+The page for the instance running as ServiceAccount `processor` in namespace `payments`:
 
 ```
-spiffe-whoami                                  k8s-prod · payments/processor-…
+WHO I AM        spiffe://example.teleport.sh/svc/payments/processor      issued by bot k8s-prod
+                derived from /svc/{{ workload.kubernetes.namespace }}/{{ workload.kubernetes.service_account }}
 
-WHO I AM
-  spiffe://example.teleport.sh/svc/payments/processor
-  issued by     bot k8s-prod
-  derived from  /svc/{{ workload.kubernetes.namespace }}/{{ workload.kubernetes.service_account }}
+SVIDs           X.509  valid 1h, renewed in the background
+                JWT    aud sts.amazonaws.com · 15m · claims sub, iss, exp, kube.{cluster,namespace,pod}
 
-WHAT THIS POD SAYS ABOUT ITSELF   namespace payments · service account processor · pod processor-7c5b…
-X.509 SVID    valid 1h, expires in 58m 33s, renewed in the background
-JWT SVID      aud sts.amazonaws.com · ttl 15m · claims: sub, iss, exp, kube.{cluster,namespace,pod}
+AWS             sts:GetCallerIdentity  ✓ arn:aws:sts::123456789012:assumed-role/spiffe-payments-processor/…
+                secretsmanager         ✓ demo/payments/processor = pa***…it
 
-USING IT: AWS
-  sts:GetCallerIdentity  ✓ arn:aws:sts::123456789012:assumed-role/spiffe-payments-processor/svc-payments-processor
-  secretsmanager         ✓ demo/payments/processor = pa***…it
-  how: the JWT above went to AssumeRoleWithWebIdentity; the role trusts this SPIFFE ID and nothing else.
-
-USING IT: PEERS OVER mTLS
-  ledger.payments:8443       ✓ accepted · peer spiffe://…/svc/payments/ledger
-  processor.analytics:8443   ✗ refused by peer · remote error: tls: bad certificate
+PEERS (mTLS)    ledger.payments:8443       ✓ accepted · peer spiffe://…/svc/payments/ledger
+                processor.analytics:8443   ✗ refused by peer · tls: bad certificate
 ```
 
-And the same page for `analytics/processor`: ID `/svc/analytics/processor`, AWS `403`,
-both payments peers `refused`. Nobody configured either identity. The namespace and
-ServiceAccount were attested by the kubelet; Teleport rendered them into the ID.
+The same page for `analytics/processor` shows a different ID, AWS `403`, and both
+payments peers refusing. Three things carry the value:
 
-Terms, if any are new: an **SVID** is a SPIFFE Verifiable Identity Document, the identity
-as a credential (an X.509 certificate or a JWT). **mTLS** is TLS where both sides present
-a certificate. **OIDC federation** is AWS accepting a JWT from an issuer it trusts in
-exchange for role credentials. The **Workload API** is the socket a pod asks for its
-identity. Ten-minute primer:
+- **The pod holds no credential.** No access key, no client certificate, no token in the
+  manifest or the image. The identity was computed by Teleport from the namespace and
+  ServiceAccount the kubelet attested.
+- **The same manifest in another namespace is refused everywhere.** AWS refuses because the
+  role's trust policy names one SPIFFE ID. The peers refuse at the TLS handshake because
+  they accept only their own project's prefix.
+- **The pipeline that deployed it had no secret either.** GitHub Actions joined Teleport
+  with GitHub's own OIDC token and received a one-hour certificate scoped to two namespaces.
+
+Terms, defined once. **SPIFFE** (Secure Production Identity Framework For Everyone) is the
+open standard for workload identity. An **SVID** (SPIFFE Verifiable Identity Document) is
+the identity as a credential: an X.509 certificate or a JWT. **mTLS** is TLS where both
+sides present a certificate. **OIDC federation** is AWS accepting a JWT from an issuer it
+trusts in exchange for role credentials. Ten-minute primer:
 [teleport-workload-identity-k8s/docs/concepts.md](https://github.com/jsabo/teleport-workload-identity-k8s/blob/main/docs/concepts.md).
 
-## Before you start
+## The components
 
-- The issuer from [teleport-workload-identity-k8s](https://github.com/jsabo/teleport-workload-identity-k8s)
-  installed on the cluster (`scripts/check.sh` there reports healthy). This app only
-  consumes the socket that issuer's CSI driver provides.
-- `tsh` and `kubectl` logged in to that cluster with rights to create namespaces,
-  ServiceAccounts, Deployments and Services.
-- Optional, for the AWS section: an AWS account where you can create an IAM OIDC
-  provider, a role and a Secrets Manager secret; Terraform 1.5+.
-- Optional, for the CI chapter: a GitHub repository you own.
+| Component | Where it runs | What it does | File |
+|---|---|---|---|
+| Issuer | every node | From [teleport-workload-identity-k8s](https://github.com/jsabo/teleport-workload-identity-k8s). Serves the SPIFFE Workload API socket and delivers it into pods as a `csi.spiffe.io` volume. Install it first. | not in this repo |
+| spiffe-whoami | a pod per instance, in `payments` and `analytics` | Reads its SVIDs from the socket with go-spiffe, serves the page and `/whoami.json`, calls AWS and its peers. Distroless, non-root, no files. | `main.go`, `identity.go`, `aws.go`, `peers.go`, `web.go`, `index.html` |
+| Instance files | your machine or CI | One `.env` per instance: the namespace and ServiceAccount (which together are the identity), the peers to call, and optionally the AWS role. `render.sh` fills them into the one manifest. | `deploy/instances/example/*.env`, `deploy/whoami.yaml`, `deploy/render.sh` |
+| AWS side | your AWS account | An OIDC identity provider for your Teleport cluster, one IAM role whose trust policy allows exactly one SPIFFE ID as `sub`, and one Secrets Manager secret that role may read. | `aws/main.tf` |
+| Deploy bot | Teleport and GitHub Actions | Bot `spiffe-whoami-deploy` joins with GitHub's OIDC token (join method `github`, pinned to your repository and branch). Its Teleport role reaches two namespaces on labelled clusters; Kubernetes RoleBindings cap it at `edit` there. | `.github/workflows/deploy.yml`, `teleport/role-deploy.yaml`, `teleport/bot-token-deploy.yaml`, `deploy/rbac.yaml` |
 
-## Quick start
+## How it works
 
-Two namespaces, three instances, one page. Replace `my-cluster` with your Teleport
-Kubernetes cluster name; nothing else needs editing.
+### Using the identity
+
+```
+ pod ── Workload API (csi volume) ──► issuer on the node ──► Teleport Auth ──► X.509 SVID + JWT SVID
+  │
+  ├── JWT (aud sts.amazonaws.com) ──AssumeRoleWithWebIdentity──► AWS role trusting one sub ──► temporary credentials
+  └── X.509 ──mTLS──► peer pod, which accepts only spiffe://<trust domain>/svc/<its own namespace>/*
+```
+
+1. On start the app opens the Workload API socket and keeps an X.509 SVID and the trust
+   bundle current in memory. The readiness probe fails until it has one, so a completed
+   rollout is proof that an identity was issued.
+2. For AWS it fetches a JWT SVID for audience `sts.amazonaws.com` and hands it to
+   `AssumeRoleWithWebIdentity`. AWS verifies the signature against Teleport's published
+   keys and checks the trust policy's `sub` condition. The result is cached for 30 seconds
+   so the page can be refreshed during a demo.
+3. For peers it serves `/whoami.json` on a second port with mTLS. The server accepts a
+   client only if its SPIFFE ID is under `/svc/<own namespace>/`. A cross-project caller
+   is refused during the handshake; no request reaches a handler.
+
+### Deploying it
+
+```
+ GitHub Actions ──GitHub OIDC token──► Teleport ──1h cert + kubeconfig──► kubectl ──► Teleport proxy ──► cluster agent
+```
+
+1. `teleport-actions/setup` installs `tbot` at the version your cluster advertises.
+2. `teleport-actions/auth-k8s` joins Teleport with the job's OIDC token. Teleport checks it
+   against GitHub's public keys and the join token's rules: this repository, this branch.
+3. Teleport issues a one-hour certificate and a kubeconfig that routes through the Teleport
+   proxy to the cluster's own agent. The runner never learns a cluster address.
+4. The job renders and applies each instance file. Every `kubectl` call is a `kube.request`
+   audit event attributed to `bot-spiffe-whoami-deploy`; a cluster-wide `get pods -A` is a
+   403, because the role covers two namespaces and nothing else.
+
+## Install
+
+You need the issuer installed on the cluster (its `scripts/check.sh` reports green) and
+`kubectl` logged in through Teleport with rights to create namespaces and Deployments.
+Replace `my-cluster` with your Teleport Kubernetes cluster name.
 
 ```bash
 tsh kube login my-cluster
@@ -69,35 +104,18 @@ kubectl create namespace payments analytics
 
 IMAGE=ghcr.io/jsabo/spiffe-whoami:latest \
   deploy/render.sh deploy/instances/example/*.env | kubectl apply -f -
-kubectl -n payments rollout status deploy/processor      # Ready means an SVID was issued
+kubectl -n payments rollout status deploy/processor
 
 kubectl -n payments port-forward svc/processor 8080 &
-open http://localhost:8080                                # or curl -s localhost:8080/whoami.json | jq
+open http://localhost:8080          # or: curl -s localhost:8080/whoami.json | jq
 ```
 
-The readiness probe fails until the pod holds an X.509 SVID, so a completed rollout is
-itself proof that the identity was issued.
+The AWS rows read "not configured" until the next section. The peer rows already show
+`ledger` accepting and `analytics` refusing.
 
-An instance file (`deploy/instances/example/*.env`) sets the namespace and the
-ServiceAccount, which together are the identity, plus the peers to call and, optionally,
-the AWS role to try. The three files are the demo: `payments/processor`,
-`payments/ledger`, `analytics/processor`. CI deploys these same three files to every
-cluster; account-specific values come from repository variables, never from the files.
+## Try it
 
-## Walkthrough
-
-### 1. Read the identity
-
-Open the page for `payments/processor` (the block under "What you will see"). The ID was
-not configured anywhere in this repository or in the pod. One templated
-`workload_identity` on the Teleport side, plus the namespace and ServiceAccount the
-kubelet attested, produced it. The line "what this pod says about itself" comes from the
-Kubernetes Downward API, so you can see the attested facts and the pod's own view agree.
-
-### 2. Use it against AWS
-
-`aws/main.tf` creates an OIDC identity provider for your Teleport cluster, one role whose
-trust policy allows exactly one `sub`, and one secret that role may read:
+### AWS without a key
 
 ```bash
 cd aws && terraform init && terraform apply \
@@ -107,165 +125,80 @@ cd aws && terraform init && terraform apply \
 cd ..
 ```
 
-Copy `role_arn` from the output into `deploy/instances/example/payments-processor.env`
-(uncomment the three `AWS_` lines), re-run the render and apply from the quick start, and
-reload the page:
+Uncomment the three `AWS_` lines in `deploy/instances/example/payments-processor.env`,
+put the `role_arn` output in, re-run the render and apply, and reload the page. The AWS
+rows turn green. Then do the same in `analytics-processor.env`: same role ARN, `403`,
+because that pod's `sub` is `/svc/analytics/processor`. The trust policy is the whole
+authorization.
 
-```
-sts:GetCallerIdentity  ✓ arn:aws:sts::123456789012:assumed-role/spiffe-payments-processor/svc-payments-processor
-secretsmanager         ✓ demo/payments/processor = pa***…it
-```
+### Peers over mTLS
 
-The app fetched a JWT SVID for audience `sts.amazonaws.com` from the Workload API and
-handed it to `AssumeRoleWithWebIdentity`. No access key exists on the pod, in the cluster,
-or in this repository. Now uncomment the same three lines in
-`analytics-processor.env`, apply, and open that page: same role ARN, `403`, because its
-`sub` is `/svc/analytics/processor`. The role's trust policy is the whole authorization.
+Already visible on the `payments/processor` page. `ledger.payments` shares the project and
+is accepted; `processor.analytics` is refused with `tls: bad certificate`. Open the
+`analytics/processor` page and both payments peers refuse it in turn.
 
-### 3. Use it against peers
+First page load takes about 1.3 seconds, almost all of it the STS exchange. A refresh
+within 30 seconds renders in under 100 milliseconds.
 
-Every instance serves `/whoami.json` on a mutual-TLS listener and accepts only clients
-whose SPIFFE ID is under `/svc/<its own namespace>/`. On the `payments/processor` page:
+## Deploy with GitHub Actions
 
-```
-ledger.payments:8443       ✓ accepted  · peer spiffe://…/svc/payments/ledger
-processor.analytics:8443   ✗ refused by peer · remote error: tls: bad certificate
-```
-
-The refusal happened at the TLS handshake on the analytics side; no request reached a
-handler. The policy is a prefix check on the SPIFFE ID, which is what the ID structure
-(`/svc/<project>/<service>`) was designed for.
-
-### What to expect
-
-| Measured, Teleport 18.11.1 | |
-|---|---|
-| Page render, all sections, first load | 1.3 s, dominated by the STS exchange |
-| Page render with the AWS result cached (30 s) | under 100 ms |
-| JWT SVID fetch from the Workload API | under 50 ms |
-| Same-project mTLS call | 230 ms first call |
-| Cross-project refusal | 6 ms, at the handshake |
-| CI: multi-arch image build + deploy to three clusters | 100 s (77 s build with cache, 23 s per cluster in parallel) |
-
-## How it works
-
-```
- pod ── Workload API (csi volume) ──► tbot on the node ──attested facts──► Teleport Auth ──SVIDs──► pod
-  │
-  ├── X.509 SVID ──mTLS──► peer pod: accept if spiffe://<td>/svc/<my namespace>/*
-  └── JWT SVID (aud sts.amazonaws.com) ──AssumeRoleWithWebIdentity──► AWS role trusting one sub
-
- GitHub Actions ──GitHub OIDC token──► Teleport ──1h cert──► kubectl ──► proxy ──► kube agent ──► cluster
-```
-
-- `identity.go`: go-spiffe `X509Source` and `JWTSource` on the socket. The SVID and trust
-  bundle stay current in memory; there are no files.
-- `aws.go`: the AWS SDK's `WebIdentityRoleProvider` with an in-memory token retriever that
-  fetches a fresh JWT SVID whenever STS asks. The result is cached for 30 s so the page
-  can be refreshed during a demo; the page says when it is showing a cached result.
-- `peers.go`: `tlsconfig.MTLSServerConfig` with an authorizer that accepts the trust domain
-  plus the `/svc/<own namespace>/` prefix; the client side accepts any member of the trust
-  domain and reports who answered.
-- `web.go`, `index.html`: the report as a page and as JSON. `/whoami.json` on the mTLS port
-  skips the peer fan-out so two instances do not call each other forever.
-- `deploy/whoami.yaml`: one Deployment, Service and ServiceAccount per instance, the
-  socket as a `csi.spiffe.io` volume (allowed under Pod Security `baseline`), no secrets.
-
-## 5-minute demo script
-
-1. `kubectl -n payments get deploy processor -o yaml | grep -ci secret` → "Zero. Nothing in
-   this pod is a credential."
-2. Open the `payments/processor` page → "Its identity was computed from namespace and
-   ServiceAccount; nothing in this repo names it."
-3. `tctl get workload_identity/svc` → "One template on the Teleport side. Every cluster
-   shares it."
-4. Point at the green AWS row → "A 15-minute JWT, exchanged with STS. The IAM trust policy
-   names one SPIFFE ID."
-5. Open the `analytics/processor` page → "Same manifest, different namespace: AWS says 403,
-   the payments peers refuse at the TLS handshake."
-6. `tctl lock --user=bot-k8s-prod --ttl=5m` → "Kill switch: this cluster's issuer stops
-   within a renewal."
-7. Open the GitHub Actions run → "The thing that deployed all of this had no kubeconfig
-   either."
-
-## Deploying with GitHub Actions and Machine ID
-
-This chapter is a complete demo of Teleport Machine ID on its own. The workflow in
-`.github/workflows/deploy.yml` builds the image, then in a second job with
-`id-token: write`:
-
-1. `teleport-actions/setup` installs `tbot` at the version your cluster advertises.
-2. `teleport-actions/auth-k8s` runs `tbot` with GitHub's OIDC token for the job. Teleport
-   verifies that token against GitHub's public keys and checks it against the join
-   token's rules: this repository, this branch. No secret is stored in GitHub.
-3. Teleport issues the bot a one-hour certificate and a kubeconfig that routes through the
-   Teleport proxy to the cluster's own agent. The runner never learns a cluster address.
-4. `deploy/render.sh` and `kubectl apply` for each instance file; the Teleport role
-   limits the bot to two namespaces, and namespaced RoleBindings (`deploy/rbac.yaml`) cap
-   it at the built-in `edit` role there.
-
-Nothing in the workflow names a tenant, a cluster or an AWS account. Those are
-repository variables (Settings → Secrets and variables → Actions → Variables), so a fork
-needs no file edits beyond the join token:
+Nothing in the workflow names a tenant, a cluster or an AWS account. Those are repository
+variables, so a fork needs two file edits and no more.
 
 | Repository variable | Value |
 |---|---|
 | `TELEPORT_PROXY` | `example.teleport.sh:443` |
-| `KUBE_CLUSTERS` | JSON list of your Teleport Kubernetes cluster names, e.g. `["k8s-prod"]`; the workflow runs one deploy job per entry |
-| `AWS_ROLE_ARN`, `AWS_SECRET_ID`, `AWS_REGION` | optional; the outputs of `aws/main.tf`. Applied to `payments/processor` and `analytics/processor`, never to `ledger` |
+| `KUBE_CLUSTERS` | JSON list of Teleport Kubernetes cluster names, e.g. `["k8s-prod"]`. One deploy job per entry |
+| `AWS_ROLE_ARN`, `AWS_SECRET_ID`, `AWS_REGION` | optional, the outputs of `aws/main.tf`. Applied to the two `processor` instances, never to `ledger` |
 
 ```bash
 gh variable set TELEPORT_PROXY --body example.teleport.sh:443
 gh variable set KUBE_CLUSTERS  --body '["k8s-prod"]'
 ```
 
-Two file edits: `teleport/bot-token-deploy.yaml` (`repository:` → your fork) and
-`teleport/role-deploy.yaml` (`kubernetes_labels` → a label your clusters carry).
-
-Teleport side, once:
+Edit `teleport/bot-token-deploy.yaml` (`repository:` to your fork) and
+`teleport/role-deploy.yaml` (`kubernetes_labels` to a label your clusters carry). Then,
+once:
 
 ```bash
-kubectl create namespace payments analytics      # on each cluster
 kubectl apply -f deploy/rbac.yaml                 # on each cluster, as an admin
 tctl create -f teleport/role-deploy.yaml
 tctl create -f teleport/bot-token-deploy.yaml
 tctl bots add spiffe-whoami-deploy --roles=spiffe-whoami-deploy --token=spiffe-whoami-deploy
 ```
 
-Push to `main`. What you should see in the run log: `Fetched new bot identity ...
-spiffe-whoami-deploy`, three `kubectl apply` outputs per cluster, three `rollout status`
-successes, and in the Teleport audit log a `kube.request` row per call attributed to
-`bot-spiffe-whoami-deploy`. Ask the bot for `kubectl get pods -A` and it gets a 403, which
-is also in the audit log: the role covers two namespaces and nothing else.
-`tctl bots instances ls` shows the bot only while a job runs; the instance record expires
-with the certificate.
+Push to `main`. The run log shows `Fetched new bot identity ... spiffe-whoami-deploy`,
+three applies and three successful rollouts per cluster. `tctl bots instances ls` lists
+one instance per running job; each record expires with its certificate.
+
+## 5-minute demo script
+
+1. `kubectl -n payments get deploy processor -o yaml | grep -ci secret` → "Zero. Nothing in
+   this pod is a credential."
+2. Open the `payments/processor` page → "Its identity was computed from namespace and
+   ServiceAccount. Nothing in this repo names it."
+3. `tctl get workload_identity/svc` → "One template on the Teleport side. Every cluster
+   shares it."
+4. The green AWS rows → "A 15-minute JWT, exchanged with STS. The IAM trust policy names
+   one SPIFFE ID."
+5. Open the `analytics/processor` page → "Same manifest, different namespace. AWS says 403
+   and the payments peers refuse at the handshake."
+6. `tctl lock --user=bot-k8s-prod --ttl=5m` → "Kill switch: this cluster's issuer stops
+   within a renewal."
+7. Open the GitHub Actions run → "The thing that deployed all of this had no kubeconfig
+   either."
 
 ## Day two
 
-- **Rotation**: nothing to do. X.509 SVIDs renew at half life inside the process; JWTs
-  are fetched per use; role credentials last as long as STS grants.
-- **Adding an instance**: one `.env` file. Adding a project: a namespace, a RoleBinding in
+- **Rotate**: nothing to do. X.509 SVIDs renew inside the process, JWTs are fetched per
+  use, and AWS credentials last as long as STS grants.
+- **Add an instance**: one `.env` file. Add a project: a namespace, a RoleBinding in
   `deploy/rbac.yaml`, and the namespace in `teleport/role-deploy.yaml`.
-- **Adding a cluster**: add its name to the `KUBE_CLUSTERS` variable, and run an issuer
-  on it.
-- **Trusting a second service in AWS**: a second role with its own `sub` condition; the
-  OIDC provider is shared.
-- **Revoking**: `tctl lock --user=bot-spiffe-whoami-deploy` stops deploys immediately;
-  `tctl lock --user=bot-<cluster>` stops issuance on a cluster within one renewal.
-
-## Layout
-
-```
-main.go identity.go aws.go peers.go web.go index.html   the app (single package); peers_test.go
-Dockerfile                                              multi-arch, distroless, nonroot
-deploy/whoami.yaml                                      the instance template
-deploy/render.sh                                        fill an instance .env into the template
-deploy/instances/example/*.env                          the three demo instances; placeholders only
-deploy/rbac.yaml                                        namespaced RoleBindings for the CI bot
-teleport/role-deploy.yaml  teleport/bot-token-deploy.yaml   the CI bot's role and github join token
-aws/main.tf                                             OIDC provider, role, demo secret
-.github/workflows/deploy.yml                            test, build, then deploy through Teleport
-```
+- **Add a cluster**: run an issuer on it and add its name to `KUBE_CLUSTERS`.
+- **Trust a second service in AWS**: a second role with its own `sub` condition. The OIDC
+  provider is shared.
+- **Revoke**: `tctl lock --user=bot-spiffe-whoami-deploy` stops deploys at once;
+  `tctl lock --user=bot-<cluster>` stops issuance on that cluster within one renewal.
 
 ## License
 
