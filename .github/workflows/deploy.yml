@@ -88,5 +88,10 @@ jobs:
             . "$inst"
             kubectl -n "$NAMESPACE" rollout status "deploy/$NAME" --timeout=180s
           done
+      # The bot's role covers two namespaces, so a cluster-wide list is refused —
+      # which is the point. List each namespace it may see.
       - name: Show what got deployed, as the bot sees it
-        run: kubectl get pods -A -l app.kubernetes.io/name=spiffe-whoami -o wide
+        run: |
+          for ns in payments analytics; do
+            kubectl -n "$ns" get pods -l app.kubernetes.io/name=spiffe-whoami -o wide
+          done

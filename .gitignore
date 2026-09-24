@@ -6,3 +6,9 @@
 /deploy/rendered/
 *.local.env
 *.local.yaml
+
+# terraform working files and state (state holds the demo secret value)
+aws/.terraform/
+aws/*.tfstate
+aws/*.tfstate.backup
+aws/*.tfvars
