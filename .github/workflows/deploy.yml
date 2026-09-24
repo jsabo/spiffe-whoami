@@ -1,0 +1,92 @@
+# Build the image, then deploy it to each Kubernetes cluster through Teleport.
+#
+# The deploy job holds no kubeconfig and no cloud credential. It joins Teleport
+# with GitHub's own OIDC token (join method `github`), pinned to this repository
+# and branch, receives a one-hour certificate for the bot `spiffe-whoami-deploy`,
+# and reaches each cluster through the Teleport proxy and the cluster's own agent.
+# The runner has no network path to any cluster. Every kubectl call is a
+# kube.request audit event attributed to the bot.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  TELEPORT_PROXY: pc3ai.teleport.sh:443
+  TELEPORT_TOKEN: spiffe-whoami-deploy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # GitHub mints the OIDC token tbot joins with
+    strategy:
+      fail-fast: false
+      matrix:
+        cluster: [k8s-k3s]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - name: Install Teleport (version follows the cluster)
+        uses: teleport-actions/setup@v1
+        with:
+          version: auto
+          proxy: ${{ env.TELEPORT_PROXY }}
+      - name: Join Teleport as bot spiffe-whoami-deploy and get a kubeconfig
+        uses: teleport-actions/auth-k8s@v2
+        with:
+          proxy: ${{ env.TELEPORT_PROXY }}
+          token: ${{ env.TELEPORT_TOKEN }}
+          kubernetes-cluster: ${{ matrix.cluster }}
+          certificate-ttl: 1h
+      - name: Deploy every instance defined for this cluster
+        env:
+          IMAGE: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for inst in deploy/instances/${{ matrix.cluster }}/*.env; do
+            echo "==> $inst"
+            deploy/render.sh "$inst" | kubectl apply -f -
+          done
+      - name: Wait for rollouts
+        run: |
+          set -euo pipefail
+          for inst in deploy/instances/${{ matrix.cluster }}/*.env; do
+            # shellcheck disable=SC1090
+            . "$inst"
+            kubectl -n "$NAMESPACE" rollout status "deploy/$NAME" --timeout=180s
+          done
+      - name: Show what got deployed, as the bot sees it
+        run: kubectl get pods -A -l app.kubernetes.io/name=spiffe-whoami -o wide

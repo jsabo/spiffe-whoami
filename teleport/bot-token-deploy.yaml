@@ -1,0 +1,23 @@
+# Join token for the GitHub Actions bot that deploys this app.
+#
+# join_method: github — the runner presents GitHub's OIDC token for the job.
+# Teleport verifies it against GitHub's public keys and checks the claims below,
+# so only a job from this repository, on this branch, can become the bot. No
+# secret is stored in GitHub. Add `workflow:` or `environment:` conditions to
+# narrow further (see the Teleport GitHub Actions deployment guide).
+#
+#   tctl create -f teleport/bot-token-deploy.yaml
+#   tctl bots add spiffe-whoami-deploy --roles=spiffe-whoami-deploy --token=spiffe-whoami-deploy
+kind: token
+version: v2
+metadata:
+  name: spiffe-whoami-deploy
+spec:
+  roles: [Bot]
+  bot_name: spiffe-whoami-deploy
+  join_method: github
+  github:
+    allow:
+      - repository: YOUR-GITHUB-USER/spiffe-whoami
+        ref: refs/heads/main
+        ref_type: branch

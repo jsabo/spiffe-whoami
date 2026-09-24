@@ -1,0 +1,8 @@
+# build output
+/spiffe-whoami
+/dist/
+
+# local renders and anything with real tenant values
+/deploy/rendered/
+*.local.env
+*.local.yaml

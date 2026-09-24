@@ -1,0 +1,35 @@
+# Kubernetes half of the deploy bot's access. Apply once per cluster as an admin.
+#
+# The Teleport role spiffe-whoami-deploy impersonates the group
+# spiffe-whoami-deployer and is limited to the payments and analytics namespaces.
+# These RoleBindings give that group the built-in `edit` ClusterRole inside
+# exactly those two namespaces — namespaced bindings, not the cluster-wide
+# teleport-kube-editor binding, so the CI bot can never touch anything else
+# even if the Teleport side were misconfigured.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spiffe-whoami-deployer
+  namespace: payments
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: Group
+    name: spiffe-whoami-deployer
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spiffe-whoami-deployer
+  namespace: analytics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: Group
+    name: spiffe-whoami-deployer
+    apiGroup: rbac.authorization.k8s.io

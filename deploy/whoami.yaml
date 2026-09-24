@@ -1,0 +1,93 @@
+# One spiffe-whoami instance. The namespace and ServiceAccount are what the
+# identity is derived from, so they are the only inputs that matter; PEERS and
+# the AWS variables shape what the page tries to use. There is no secret in this
+# manifest and none is needed. Rendered by deploy/render.sh from an instance file.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app.kubernetes.io/name: spiffe-whoami
+    app.kubernetes.io/instance: ${NAME}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: mtls
+      port: 8443
+      targetPort: mtls
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: spiffe-whoami
+    app.kubernetes.io/instance: ${NAME}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spiffe-whoami
+      app.kubernetes.io/instance: ${NAME}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spiffe-whoami
+        app.kubernetes.io/instance: ${NAME}
+    spec:
+      serviceAccountName: ${NAME}
+      containers:
+        - name: whoami
+          image: ${IMAGE}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: mtls
+              containerPort: 8443
+          env:
+            # The SPIFFE Workload API socket, served by the node's Teleport tbot.
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix:///spiffe-workload-api/spiffe.sock
+            # Shown next to the attested facts so the audience can see they agree.
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_SERVICE_ACCOUNT
+              valueFrom: { fieldRef: { fieldPath: spec.serviceAccountName } }
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: PEERS
+              value: "${PEERS}"
+            - name: AWS_ROLE_ARN
+              value: "${AWS_ROLE_ARN}"
+            - name: AWS_SECRET_ID
+              value: "${AWS_SECRET_ID}"
+            - name: AWS_REGION
+              value: "${AWS_REGION}"
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      volumes:
+        # The issuer DaemonSet's socket directory (teleport-workload-identity-k8s).
+        - name: spiffe-workload-api
+          hostPath:
+            path: /run/spire/agent-sockets
+            type: Directory

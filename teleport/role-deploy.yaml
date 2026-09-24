@@ -1,0 +1,37 @@
+# The deploy bot's Teleport role: write access to the two project namespaces on
+# the demo clusters and nothing beyond them.
+#
+# Teleport decides which clusters (by label) and which namespaces are reachable.
+# Kubernetes RBAC caps what can be done there through the spiffe-whoami-deployer
+# group, which deploy/rbac.yaml binds to the built-in `edit` ClusterRole inside
+# exactly those namespaces. Both layers must be wrong for this to become
+# cluster administration.
+#
+#   tctl create -f teleport/role-deploy.yaml
+kind: role
+version: v8
+metadata:
+  name: spiffe-whoami-deploy
+  description: >-
+    Deploy spiffe-whoami into the payments and analytics namespaces of the demo
+    Kubernetes clusters. Held by the GitHub Actions bot only.
+spec:
+  options:
+    max_session_ttl: 1h0m0s
+  allow:
+    kubernetes_labels:
+      env: demo            # your clusters' label
+    kubernetes_groups:
+      - spiffe-whoami-deployer
+    kubernetes_resources:
+      - kind: '*'
+        api_group: '*'
+        namespace: payments
+        name: '*'
+        verbs: ['*']
+      - kind: '*'
+        api_group: '*'
+        namespace: analytics
+        name: '*'
+        verbs: ['*']
+  deny: {}
