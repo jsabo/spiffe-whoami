@@ -86,8 +86,11 @@ spec:
               mountPath: /spiffe-workload-api
               readOnly: true
       volumes:
-        # The issuer DaemonSet's socket directory (teleport-workload-identity-k8s).
+        # The issuer's Workload API socket, delivered by the SPIFFE CSI driver that
+        # ships with teleport-workload-identity-k8s. A csi volume is allowed under
+        # Pod Security baseline and restricted; a hostPath would need this namespace
+        # to be privileged.
         - name: spiffe-workload-api
-          hostPath:
-            path: /run/spire/agent-sockets
-            type: Directory
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
