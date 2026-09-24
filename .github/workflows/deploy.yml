@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cluster: [k8s-k3s]
+        cluster: [k8s-k3s, k8s-talos, k8s-eks]
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-kubectl@v4
