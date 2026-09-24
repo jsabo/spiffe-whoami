@@ -8,6 +8,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/spiffe-whoami /spiffe-whoami
-USER nonroot
+# Numeric, so runAsNonRoot can be verified without a runAsUser in the manifest.
+USER 65532:65532
 EXPOSE 8080 8443
 ENTRYPOINT ["/spiffe-whoami"]

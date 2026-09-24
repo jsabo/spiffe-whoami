@@ -46,9 +46,24 @@ spec:
         app.kubernetes.io/instance: ${NAME}
     spec:
       serviceAccountName: ${NAME}
+      # Pod Security "restricted" compliant: distroless nonroot image (uid 65532,
+      # stated numerically because the kubelet cannot verify a named user), no
+      # privilege escalation, no capabilities, read-only root; the csi volume is
+      # allowed at every level.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: whoami
           image: ${IMAGE}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
           ports:
             - name: http
               containerPort: 8080
