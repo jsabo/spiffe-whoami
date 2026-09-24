@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,6 +24,7 @@ type AWSResult struct {
 	SecretValue string `json:"secret_value_masked,omitempty"`
 	Error       string `json:"error,omitempty"`
 	Elapsed     string `json:"elapsed,omitempty"`
+	Cached      string `json:"cached_for,omitempty"` // set when served from the 30 s cache
 }
 
 // jwtTokenRetriever hands the AWS SDK a fresh JWT SVID every time it needs to
@@ -44,10 +46,38 @@ func (r jwtTokenRetriever) GetIdentityToken() ([]byte, error) {
 	return []byte(svid.Marshal()), nil
 }
 
+// awsCache keeps the last result for a short time so refreshing the page during
+// a demo does not pay the STS round trip every time. The identity itself is
+// not cached; the SDK re-exchanges the JWT when the role credentials expire.
+var awsCache struct {
+	mu     sync.Mutex
+	result *AWSResult
+	at     time.Time
+}
+
+const awsCacheTTL = 30 * time.Second
+
 func callAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
 	if cfg.AWSRoleARN == "" {
 		return &AWSResult{Configured: false}
 	}
+	awsCache.mu.Lock()
+	if awsCache.result != nil && time.Since(awsCache.at) < awsCacheTTL {
+		r := *awsCache.result
+		r.Cached = time.Since(awsCache.at).Round(time.Second).String()
+		awsCache.mu.Unlock()
+		return &r
+	}
+	awsCache.mu.Unlock()
+
+	res := doCallAWS(ctx, cfg, id)
+	awsCache.mu.Lock()
+	awsCache.result, awsCache.at = res, time.Now()
+	awsCache.mu.Unlock()
+	return res
+}
+
+func doCallAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
 	start := time.Now()
 	res := &AWSResult{Configured: true, RoleARN: cfg.AWSRoleARN, SecretID: cfg.AWSSecretID}
 

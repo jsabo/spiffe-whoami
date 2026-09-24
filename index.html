@@ -89,7 +89,7 @@
         {{if .Error}}
         <tr><td>result</td><td class="bad">✗ {{.Error}}</td></tr>
         {{end}}
-        <tr><td>how</td><td class="muted">the JWT above is handed to STS AssumeRoleWithWebIdentity; the role trusts this SPIFFE ID and nothing else. No access key exists on this pod. {{.Elapsed}}</td></tr>
+        <tr><td>how</td><td class="muted">the JWT above is handed to STS AssumeRoleWithWebIdentity; the role trusts this SPIFFE ID and nothing else. No access key exists on this pod. {{if .Cached}}result cached {{.Cached}} ago{{else}}{{.Elapsed}}{{end}}</td></tr>
       </table>
       {{end}}
     {{end}}
