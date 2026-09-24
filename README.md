@@ -22,8 +22,9 @@ SVIDs           X.509  valid 1h, renewed in the background
 AWS             sts:GetCallerIdentity  ✓ arn:aws:sts::123456789012:assumed-role/spiffe-payments-processor/…
                 secretsmanager         ✓ demo/payments/processor = pa***…it
 
-PEERS (mTLS)    ledger.payments:8443       ✓ accepted · peer spiffe://…/svc/payments/ledger
-                processor.analytics:8443   ✗ refused by peer · tls: bad certificate
+PEERS (mTLS)    ledger.payments:8443       accepted · peer spiffe://…/svc/payments/ledger
+                processor.analytics:8443   refused, as intended · analytics accepts only /svc/analytics/*
+                                           (decided at the TLS handshake; alert: bad certificate)
 ```
 
 The same page for `analytics/processor` shows a different ID, AWS `403`, and both
@@ -42,14 +43,14 @@ Terms, defined once. **SPIFFE** (Secure Production Identity Framework For Everyo
 open standard for workload identity. An **SVID** (SPIFFE Verifiable Identity Document) is
 the identity as a credential: an X.509 certificate or a JWT. **mTLS** is TLS where both
 sides present a certificate. **OIDC federation** is AWS accepting a JWT from an issuer it
-trusts in exchange for role credentials. Ten-minute primer:
-[teleport-workload-identity-k8s/docs/concepts.md](https://github.com/jsabo/teleport-workload-identity-k8s/blob/main/docs/concepts.md).
+trusts in exchange for role credentials. The **Workload API** is the Unix socket a pod asks
+for its SVIDs; the **trust domain** is the issuer's name, here your Teleport cluster.
 
 ## The components
 
 | Component | Where it runs | What it does | File |
 |---|---|---|---|
-| Issuer | every node | From [teleport-workload-identity-k8s](https://github.com/jsabo/teleport-workload-identity-k8s). Serves the SPIFFE Workload API socket and delivers it into pods as a `csi.spiffe.io` volume. Install it first. | not in this repo |
+| Issuer | every node | Teleport Workload Identity: a `tbot` with the `workload-identity-api` service on each node, attesting pods through the kubelet, with the SPIFFE CSI driver delivering its socket into pods as a `csi.spiffe.io` volume. Any SPIFFE Workload API served the same way works. Install it first. | not in this repo |
 | spiffe-whoami | a pod per instance, in `payments` and `analytics` | Reads its SVIDs from the socket with go-spiffe, serves the page and `/whoami.json`, calls AWS and its peers. Distroless, non-root, no files. | `main.go`, `identity.go`, `aws.go`, `peers.go`, `web.go`, `index.html` |
 | Instance files | your machine or CI | One `.env` per instance: the namespace and ServiceAccount (which together are the identity), the peers to call, and optionally the AWS role. `render.sh` fills them into the one manifest. | `deploy/instances/example/*.env`, `deploy/whoami.yaml`, `deploy/render.sh` |
 | AWS side | your AWS account | An OIDC identity provider for your Teleport cluster, one IAM role whose trust policy allows exactly one SPIFFE ID as `sub`, and one Secrets Manager secret that role may read. | `aws/main.tf` |
@@ -94,7 +95,8 @@ trusts in exchange for role credentials. Ten-minute primer:
 
 ## Install
 
-You need the issuer installed on the cluster (its `scripts/check.sh` reports green) and
+You need a Teleport Workload Identity issuer on the cluster that delivers the Workload API
+as a `csi.spiffe.io` volume (any pod declaring that volume gets an SVID), and
 `kubectl` logged in through Teleport with rights to create namespaces and Deployments.
 Replace `my-cluster` with your Teleport Kubernetes cluster name.
 

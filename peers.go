@@ -22,6 +22,25 @@ type PeerResult struct {
 	Error    string `json:"error,omitempty"`
 	Elapsed  string `json:"elapsed"`
 	Decision string `json:"decision"`
+	// Namespace is the peer's project, read from its Service DNS name
+	// (processor.analytics:8443 → analytics). SameProject says whether the peer
+	// should accept us, so the page can tell an intended refusal from a fault.
+	Namespace   string `json:"namespace,omitempty"`
+	SameProject bool   `json:"same_project"`
+}
+
+// targetNamespace reads the namespace out of a Kubernetes Service address:
+// <service>.<namespace>[.svc...][:port]. Empty when the address has no dot.
+func targetNamespace(target string) string {
+	host := target
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
 }
 
 // sameProjectAuthorizer is the server-side policy: accept a client only if its
@@ -63,7 +82,11 @@ func callPeers(ctx context.Context, id *Identity, targets []string) []PeerResult
 
 func callPeer(ctx context.Context, id *Identity, target string) PeerResult {
 	start := time.Now()
-	res := PeerResult{Target: target}
+	res := PeerResult{Target: target, Namespace: targetNamespace(target)}
+	// Our own project is the second path element of our ID: /svc/<project>/...
+	if parts := strings.Split(strings.Trim(id.SPIFFEID().Path(), "/"), "/"); len(parts) >= 2 {
+		res.SameProject = parts[1] == res.Namespace
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

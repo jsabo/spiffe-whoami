@@ -101,8 +101,8 @@ spec:
               mountPath: /spiffe-workload-api
               readOnly: true
       volumes:
-        # The issuer's Workload API socket, delivered by the SPIFFE CSI driver that
-        # ships with teleport-workload-identity-k8s. A csi volume is allowed under
+        # The issuer's Workload API socket, delivered by the SPIFFE CSI driver
+        # installed alongside the issuer. A csi volume is allowed under
         # Pod Security baseline and restricted; a hostPath would need this namespace
         # to be privileged.
         - name: spiffe-workload-api
