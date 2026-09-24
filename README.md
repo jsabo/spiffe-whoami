@@ -80,10 +80,9 @@ itself proof that the identity was issued.
 
 An instance file (`deploy/instances/example/*.env`) sets the namespace and the
 ServiceAccount, which together are the identity, plus the peers to call and, optionally,
-the AWS role to try. The three examples are the demo: `payments/processor`,
-`payments/ledger`, `analytics/processor`. The `k8s-k3s`, `k8s-talos` and `k8s-eks`
-directories are the author's clusters, deployed by CI; they are identical apart from the
-real AWS role ARN.
+the AWS role to try. The three files are the demo: `payments/processor`,
+`payments/ledger`, `analytics/processor`. CI deploys these same three files to every
+cluster; account-specific values come from repository variables, never from the files.
 
 ## Walkthrough
 
@@ -205,14 +204,23 @@ This chapter is a complete demo of Teleport Machine ID on its own. The workflow 
    limits the bot to two namespaces, and namespaced RoleBindings (`deploy/rbac.yaml`) cap
    it at the built-in `edit` role there.
 
-Four edits before your first push:
+Nothing in the workflow names a tenant, a cluster or an AWS account. Those are
+repository variables (Settings → Secrets and variables → Actions → Variables), so a fork
+needs no file edits beyond the join token:
 
-| File | Change |
+| Repository variable | Value |
 |---|---|
-| `teleport/bot-token-deploy.yaml` | `repository: YOUR-GITHUB-USER/spiffe-whoami` → your fork |
-| `teleport/role-deploy.yaml` | `kubernetes_labels` → a label your clusters carry |
-| `.github/workflows/deploy.yml` | `TELEPORT_PROXY` → your proxy; `matrix.cluster` → your Teleport Kubernetes cluster names, one `deploy/instances/<name>/` directory each |
-| `deploy/instances/<name>/*.env` | copy from `example/`; set `AWS_ROLE_ARN` if you applied `aws/` |
+| `TELEPORT_PROXY` | `example.teleport.sh:443` |
+| `KUBE_CLUSTERS` | JSON list of your Teleport Kubernetes cluster names, e.g. `["k8s-prod"]`; the workflow runs one deploy job per entry |
+| `AWS_ROLE_ARN`, `AWS_SECRET_ID`, `AWS_REGION` | optional; the outputs of `aws/main.tf`. Applied to `payments/processor` and `analytics/processor`, never to `ledger` |
+
+```bash
+gh variable set TELEPORT_PROXY --body example.teleport.sh:443
+gh variable set KUBE_CLUSTERS  --body '["k8s-prod"]'
+```
+
+Two file edits: `teleport/bot-token-deploy.yaml` (`repository:` → your fork) and
+`teleport/role-deploy.yaml` (`kubernetes_labels` → a label your clusters carry).
 
 Teleport side, once:
 
@@ -238,8 +246,8 @@ with the certificate.
   are fetched per use; role credentials last as long as STS grants.
 - **Adding an instance**: one `.env` file. Adding a project: a namespace, a RoleBinding in
   `deploy/rbac.yaml`, and the namespace in `teleport/role-deploy.yaml`.
-- **Adding a cluster**: an instance directory, the cluster in the workflow matrix, and an
-  issuer on that cluster.
+- **Adding a cluster**: add its name to the `KUBE_CLUSTERS` variable, and run an issuer
+  on it.
 - **Trusting a second service in AWS**: a second role with its own `sub` condition; the
   OIDC provider is shared.
 - **Revoking**: `tctl lock --user=bot-spiffe-whoami-deploy` stops deploys immediately;
@@ -252,8 +260,7 @@ main.go identity.go aws.go peers.go web.go index.html   the app (single package)
 Dockerfile                                              multi-arch, distroless, nonroot
 deploy/whoami.yaml                                      the instance template
 deploy/render.sh                                        fill an instance .env into the template
-deploy/instances/example/*.env                          start here; placeholders only
-deploy/instances/{k8s-k3s,k8s-talos,k8s-eks}/*.env      the author's clusters, deployed by CI
+deploy/instances/example/*.env                          the three demo instances; placeholders only
 deploy/rbac.yaml                                        namespaced RoleBindings for the CI bot
 teleport/role-deploy.yaml  teleport/bot-token-deploy.yaml   the CI bot's role and github join token
 aws/main.tf                                             OIDC provider, role, demo secret

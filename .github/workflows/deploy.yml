@@ -6,6 +6,15 @@
 # and reaches each cluster through the Teleport proxy and the cluster's own agent.
 # The runner has no network path to any cluster. Every kubectl call is a
 # kube.request audit event attributed to the bot.
+#
+# Everything specific to one Teleport tenant comes from repository variables
+# (Settings → Secrets and variables → Actions → Variables), so this file and the
+# instance files stay generic:
+#   TELEPORT_PROXY   e.g. example.teleport.sh:443
+#   KUBE_CLUSTERS    JSON list of Teleport Kubernetes cluster names, e.g. ["k8s-prod"]
+#   AWS_ROLE_ARN     optional; the role from aws/main.tf, applied to instances that
+#   AWS_SECRET_ID    opt in (payments/processor and analytics/processor)
+#   AWS_REGION       optional, default us-east-2
 name: deploy
 
 on:
@@ -15,11 +24,9 @@ on:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
-  TELEPORT_PROXY: pc3ai.teleport.sh:443
-  TELEPORT_TOKEN: spiffe-whoami-deploy
 
 jobs:
-  build:
+  test-and-build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,7 +58,7 @@ jobs:
             ${{ env.IMAGE }}:latest
 
   deploy:
-    needs: build
+    needs: test-and-build
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cluster: [k8s-k3s, k8s-talos, k8s-eks]
+        cluster: ${{ fromJSON(vars.KUBE_CLUSTERS) }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-kubectl@v4
@@ -67,27 +74,30 @@ jobs:
         uses: teleport-actions/setup@v1
         with:
           version: auto
-          proxy: ${{ env.TELEPORT_PROXY }}
+          proxy: ${{ vars.TELEPORT_PROXY }}
       - name: Join Teleport as bot spiffe-whoami-deploy and get a kubeconfig
         uses: teleport-actions/auth-k8s@v2
         with:
-          proxy: ${{ env.TELEPORT_PROXY }}
-          token: ${{ env.TELEPORT_TOKEN }}
+          proxy: ${{ vars.TELEPORT_PROXY }}
+          token: spiffe-whoami-deploy
           kubernetes-cluster: ${{ matrix.cluster }}
           certificate-ttl: 1h
-      - name: Deploy every instance defined for this cluster
+      - name: Deploy the three instances
         env:
-          IMAGE: ${{ env.IMAGE }}:${{ needs.build.outputs.tag }}
+          IMAGE: ${{ env.IMAGE }}:${{ needs.test-and-build.outputs.tag }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          AWS_SECRET_ID: ${{ vars.AWS_SECRET_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           set -euo pipefail
-          for inst in deploy/instances/${{ matrix.cluster }}/*.env; do
+          for inst in deploy/instances/example/*.env; do
             echo "==> $inst"
             deploy/render.sh "$inst" | kubectl apply -f -
           done
-      - name: Wait for rollouts
+      - name: Wait for rollouts (Ready means an SVID was issued)
         run: |
           set -euo pipefail
-          for inst in deploy/instances/${{ matrix.cluster }}/*.env; do
+          for inst in deploy/instances/example/*.env; do
             # shellcheck disable=SC1090
             . "$inst"
             kubectl -n "$NAMESPACE" rollout status "deploy/$NAME" --timeout=180s
