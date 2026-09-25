@@ -27,16 +27,26 @@ type AWSResult struct {
 	Cached      string `json:"cached_for,omitempty"` // set when served from the 30 s cache
 }
 
-// jwtTokenRetriever hands the AWS SDK a fresh JWT SVID every time it needs to
-// assume the role. The token never touches disk: the SDK calls GetIdentityToken,
-// we fetch a 15-minute JWT from the Workload API with audience sts.amazonaws.com,
-// and STS exchanges it for role credentials because the AWS OIDC provider trusts
-// the Teleport cluster's issuer and the role's trust policy names this SPIFFE ID.
+// jwtTokenRetriever hands the AWS SDK a JWT SVID when it assumes the role. The
+// token never touches disk: the SDK calls GetIdentityToken, we return the
+// 15-minute JWT (audience sts.amazonaws.com) the page already fetched, or fetch
+// one from the Workload API if none was given, and STS exchanges it for role
+// credentials because the AWS OIDC provider trusts the Teleport cluster's
+// issuer and the role's trust policy names this SPIFFE ID.
 type jwtTokenRetriever struct {
-	id *Identity
+	id    *Identity
+	mu    sync.Mutex
+	token string // used once, then fetched fresh
 }
 
-func (r jwtTokenRetriever) GetIdentityToken() ([]byte, error) {
+func (r *jwtTokenRetriever) GetIdentityToken() ([]byte, error) {
+	r.mu.Lock()
+	t := r.token
+	r.token = ""
+	r.mu.Unlock()
+	if t != "" {
+		return []byte(t), nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	svid, err := r.id.JWT(ctx, "sts.amazonaws.com")
@@ -57,7 +67,9 @@ var awsCache struct {
 
 const awsCacheTTL = 30 * time.Second
 
-func callAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
+// callAWS assumes the role with token (the JWT the page already holds; empty
+// means fetch one) and reads the secret. Results are cached for 30 s.
+func callAWS(ctx context.Context, cfg Config, id *Identity, token string) *AWSResult {
 	if cfg.AWSRoleARN == "" {
 		return &AWSResult{Configured: false}
 	}
@@ -70,14 +82,14 @@ func callAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
 	}
 	awsCache.mu.Unlock()
 
-	res := doCallAWS(ctx, cfg, id)
+	res := doCallAWS(ctx, cfg, id, token)
 	awsCache.mu.Lock()
 	awsCache.result, awsCache.at = res, time.Now()
 	awsCache.mu.Unlock()
 	return res
 }
 
-func doCallAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
+func doCallAWS(ctx context.Context, cfg Config, id *Identity, token string) *AWSResult {
 	start := time.Now()
 	res := &AWSResult{Configured: true, RoleARN: cfg.AWSRoleARN, SecretID: cfg.AWSSecretID}
 
@@ -86,7 +98,7 @@ func doCallAWS(ctx context.Context, cfg Config, id *Identity) *AWSResult {
 
 	// Anonymous STS client for the exchange; the provider signs nothing itself.
 	stsClient := sts.New(sts.Options{Region: cfg.AWSRegion, Credentials: aws.AnonymousCredentials{}})
-	provider := stscreds.NewWebIdentityRoleProvider(stsClient, cfg.AWSRoleARN, jwtTokenRetriever{id: id},
+	provider := stscreds.NewWebIdentityRoleProvider(stsClient, cfg.AWSRoleARN, &jwtTokenRetriever{id: id, token: token},
 		func(o *stscreds.WebIdentityRoleOptions) { o.RoleSessionName = sessionName(id) })
 
 	awsCfg, err := config.LoadDefaultConfig(ctx,

@@ -72,8 +72,9 @@ for its SVIDs; the **trust domain** is the issuer's name, here your Teleport clu
    rollout is proof that an identity was issued.
 2. For AWS it fetches a JWT SVID for audience `sts.amazonaws.com` and hands it to
    `AssumeRoleWithWebIdentity`. AWS verifies the signature against Teleport's published
-   keys and checks the trust policy's `sub` condition. The result is cached for 30 seconds
-   so the page can be refreshed during a demo.
+   keys and checks the trust policy's `sub` condition. The JWT shown on the page is the
+   one exchanged, so one visit is one `spiffe.svid.issued` audit event for this pod; the
+   AWS result is cached for 30 seconds so the page can be refreshed during a demo.
 3. For peers it serves `/whoami.json` on a second port with mTLS. The server accepts a
    client only if its SPIFFE ID is under `/svc/<own namespace>/`. A cross-project caller
    is refused during the handshake; no request reaches a handler.

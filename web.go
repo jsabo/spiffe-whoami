@@ -54,7 +54,11 @@ type PodInfo struct {
 	Node           string `json:"node"`
 }
 
-func (s *Server) report(ctx context.Context, withPeers bool) *Report {
+// report builds the page. full is true for the browser and false when a peer
+// asks over mTLS: a peer has already verified our X.509 SVID at the handshake
+// and reads only the SPIFFE ID, so fetching a JWT for it would be a wasted
+// issuance in the audit log, and calling peers back would loop forever.
+func (s *Server) report(ctx context.Context, full bool) *Report {
 	r := &Report{
 		GeneratedAt: time.Now().UTC(),
 		Pod: PodInfo{
@@ -68,15 +72,23 @@ func (s *Server) report(ctx context.Context, withPeers bool) *Report {
 	if r.X509, err = s.id.X509Info(); err != nil {
 		r.X509Error = err.Error()
 	}
+	if !full {
+		return r
+	}
+	// One JWT per page: the token shown in the JWT section is the same one
+	// handed to STS below, so a visit is one spiffe.svid.issued event.
+	var token string
 	if r.JWT, err = s.id.JWTInfo(ctx, "sts.amazonaws.com"); err != nil {
 		r.JWTError = err.Error()
+	} else {
+		token = r.JWT.Raw
 	}
 
 	// AWS and peers are network calls; run them together.
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); r.AWS = callAWS(ctx, s.cfg, s.id) }()
-	if withPeers && len(s.cfg.Peers) > 0 {
+	go func() { defer wg.Done(); r.AWS = callAWS(ctx, s.cfg, s.id, token) }()
+	if len(s.cfg.Peers) > 0 {
 		wg.Add(1)
 		go func() { defer wg.Done(); r.Peers = callPeers(ctx, s.id, s.cfg.Peers) }()
 	}
@@ -85,6 +97,12 @@ func (s *Server) report(ctx context.Context, withPeers bool) *Report {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, req *http.Request) {
+	// "/" is Go's catch-all pattern; without this, a browser's /favicon.ico
+	// request would render a second full report, with a second JWT issuance.
+	if req.URL.Path != "/" {
+		http.NotFound(w, req)
+		return
+	}
 	r := s.report(req.Context(), true)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTmpl.Execute(w, r); err != nil {
@@ -95,9 +113,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, req *http.Request) {
 // handleJSON serves the report. On the mTLS listener the caller is a peer that
 // already passed the same-project authorizer at the handshake; we skip the peer
 // fan-out there so two apps do not ping-pong forever.
-func (s *Server) handleJSON(withPeers bool) http.HandlerFunc {
+func (s *Server) handleJSON(full bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		r := s.report(req.Context(), withPeers)
+		r := s.report(req.Context(), full)
 		w.Header().Set("Content-Type", "application/json")
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
